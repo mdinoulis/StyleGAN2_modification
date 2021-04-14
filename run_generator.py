@@ -170,6 +170,15 @@ def style_mix_3(network_pkl, from_seeds, to_seeds, truncation_psi, col_styles, n
     num_intermediates=num_blends
     windowName = "Mix Result"
 
+    def save_image():
+        print('Saving image...')
+        print("From seed", from_val, "To seed", to_val, "Mix", mix_val)
+        from_w = w_dict[from_val].copy()
+        to_w = w_dict[to_val].copy()  
+        new_w = from_w
+        new_w[styles] = (mix_val/num_intermediates * to_w[styles]) + ((num_intermediates-mix_val)/num_intermediates * from_w[styles])
+        image = Gs.components.synthesis.run(new_w[np.newaxis], **Gs_syn_kwargs)[0]
+        PIL.Image.fromarray(image, 'RGB').resize((view_size,view_size)).save(dnnlib.make_run_dir_path('%d-%d-%d.png' % (from_val, to_val, mix_val)))
     
     def from_change(value):    
 
@@ -256,21 +265,140 @@ def style_mix_3(network_pkl, from_seeds, to_seeds, truncation_psi, col_styles, n
         cv2.createTrackbar('to', windowName, 0, len(to_seeds)-1, to_change)
     cv2.createTrackbar('mix', windowName, 0, num_blends, mix_change)
 
-    cv2.waitKey(0)
+    while True:
+        key_press = cv2.waitKey(0)
+        if key_press == 115: # 'S'
+            save_image()
+        elif key_press == 27: # 'ESC'
+            break
     cv2.destroyAllWindows()
 
-    print('Saving images...')
-    print("From seed", from_val, "To seed", to_val, "Mix", mix_val)
-    from_w = w_dict[from_val].copy()
-    to_w = w_dict[to_val].copy()  
-    new_w = from_w
-    new_w[styles] = (mix_val/num_intermediates * to_w[styles]) + ((num_intermediates-mix_val)/num_intermediates * from_w[styles])
-    image = Gs.components.synthesis.run(new_w[np.newaxis], **Gs_syn_kwargs)[0]
-    PIL.Image.fromarray(image, 'RGB').save(dnnlib.make_run_dir_path('%d-%d-%d.png' % (from_val, to_val, mix_val)))
 
+#----------------------------------------------------------------------------
 
+def style_mix_4(network_pkl, from_seeds, to_seeds, truncation_psi, col_styles, num_blends, view_size, minibatch_size=4):
 
+    global mix_val
+    global from_val
+    global to_val
+    global psi_val
+    global styles
     
+    mix_val = -num_blends
+    psi_val = truncation_psi
+    styles = col_styles
+    
+    num_intermediates=num_blends
+    windowName = "Mix Result"
+
+    def save_image():
+        print('Saving image...')
+        print("From seed", from_val, "To seed", to_val, "Mix", mix_val)
+        from_w = w_dict[from_val].copy()
+        to_w = w_dict[to_val].copy()  
+        new_w = from_w
+        new_w[styles] = from_w[styles] + mix_val/num_blends * (to_w[styles]-w_avg)
+        image = Gs.components.synthesis.run(new_w[np.newaxis], **Gs_syn_kwargs)[0]
+        PIL.Image.fromarray(image, 'RGB').resize((view_size,view_size)).save(dnnlib.make_run_dir_path('%d_%d_%d.png' % (from_val, to_val, mix_val)))
+
+     
+    def from_change(value):    
+
+        global from_val
+        from_val = from_seeds[value]
+        on_change()
+        
+    def to_change(value):    
+
+        global to_val
+        to_val = to_seeds[value]
+        on_change()
+
+    def mix_change(value):    
+
+        global mix_val
+        mix_val = value - num_blends
+        on_change()
+
+    def psi_change(value):    
+
+        global psi_val
+        psi_val = value
+        on_change()
+
+        
+    def on_change():    
+
+        global mix_val
+        global from_val
+        global to_val
+        global psi_val
+        global styles
+        
+        from_w = w_dict[from_val].copy()   
+        to_w = w_dict[to_val].copy()
+
+        new_w = from_w
+        new_w[styles] = from_w[styles] + mix_val/num_blends * (to_w[styles]-w_avg)
+
+        image = Gs.components.synthesis.run(new_w[np.newaxis], **Gs_syn_kwargs)[0]
+        imageCopy = cv2.cvtColor(image, cv2.COLOR_RGB2BGR).copy()
+        imageCopy = cv2.resize(imageCopy, (view_size,view_size))
+        
+        cv2.imshow(windowName, imageCopy)
+        
+        return
+    
+    print('Loading networks from "%s"...' % network_pkl)
+    _G, _D, Gs = pretrained_networks.load_networks(network_pkl)
+    w_avg = Gs.get_var('dlatent_avg') # [component]
+
+    Gs_syn_kwargs = dnnlib.EasyDict()
+    Gs_syn_kwargs.output_transform = dict(func=tflib.convert_images_to_uint8, nchw_to_nhwc=True)
+    Gs_syn_kwargs.randomize_noise = False
+    Gs_syn_kwargs.minibatch_size = minibatch_size
+
+    print('Generating W vectors...')
+    all_seeds = list(set(to_seeds + from_seeds))
+    all_z = np.stack([np.random.RandomState(seed).randn(*Gs.input_shape[1:]) for seed in all_seeds]) # [minibatch, component]
+    all_w = Gs.components.mapping.run(all_z, None) # [minibatch, layer, component]
+    all_w = w_avg + (all_w - w_avg) * truncation_psi # [minibatch, layer, component]
+    w_dict = {seed: w for seed, w in zip(all_seeds, list(all_w))} # [layer, component]
+
+    print('Generating images...')
+    all_images = Gs.components.synthesis.run(all_w, **Gs_syn_kwargs) # [minibatch, height, width, channel]
+    image_dict = {(seed, seed, 0): image for seed, image in zip(all_seeds, list(all_images))}
+
+    from_w = w_dict[from_seeds[0]].copy()
+    to_w = w_dict[to_seeds[0]].copy()
+    from_val = from_seeds[0]
+    to_val = to_seeds[0]
+
+    new_w = from_w
+    new_w[styles] = from_w[styles] + mix_val/num_blends * (to_w[styles]-w_avg)
+    image = Gs.components.synthesis.run(new_w[np.newaxis], **Gs_syn_kwargs)[0]
+                                     
+    image_dict[(to_seeds[0], to_seeds[0], 0)] = image
+    image_cv2 = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    image_cv2 = cv2.resize(image_cv2, (view_size,view_size))
+    cv2.imshow(windowName, image_cv2)
+    
+    if len(from_seeds) > 1:
+        cv2.createTrackbar('from', windowName, 0, len(from_seeds)-1, from_change)    
+    if len(to_seeds) > 1:
+        cv2.createTrackbar('to', windowName, 0, len(to_seeds)-1, to_change)
+    cv2.createTrackbar('mix', windowName, 0, num_blends*2, mix_change)
+
+    while True:
+        key_press = cv2.waitKey(0)
+        if key_press == 115: # 'S'
+            save_image()
+        elif key_press == 27: # 'ESC'
+            break
+    cv2.destroyAllWindows()
+
+
+   
 #----------------------------------------------------------------------------
 
 def _parse_num_range(s):
@@ -344,7 +472,18 @@ Run 'python %(prog)s <subcommand> --help' for subcommand help.''',
     parser_style_mix_3.add_argument('--truncation-psi', type=float, help='Truncation psi (default: %(default)s)', default=0.5)
     parser_style_mix_3.add_argument('--result-dir', help='Root directory for run results (default: %(default)s)', default='results', metavar='DIR')
     parser_style_mix_3.add_argument('--num-blends', type=int, help='Number of intermediate blends (default: %(default)s)', default=100)
-    parser_style_mix_3.add_argument('--view_size', type=int, help='Display size for image (default: %(default)s)', default=512)
+    parser_style_mix_3.add_argument('--view-size', type=int, help='Display size for image (default: %(default)s)', default=512)
+
+    parser_style_mix_4 = subparsers.add_parser('style-mix-4', help='Generate style mix 4')
+    parser_style_mix_4.add_argument('--network', help='Network pickle filename', dest='network_pkl', required=True)
+    parser_style_mix_4.add_argument('--from-seeds', type=_parse_num_range, help='Random seeds to use for mapping', required=True)
+    parser_style_mix_4.add_argument('--to-seeds', type=_parse_num_range, help='Random seed to use to map to', required=True)
+    parser_style_mix_4.add_argument('--col-styles', type=_parse_num_range, help='Style layer range (default: %(default)s)', default='0-13')
+    parser_style_mix_4.add_argument('--truncation-psi', type=float, help='Truncation psi (default: %(default)s)', default=0.5)
+    parser_style_mix_4.add_argument('--result-dir', help='Root directory for run results (default: %(default)s)', default='results', metavar='DIR')
+    parser_style_mix_4.add_argument('--num-blends', type=int, help='Number of intermediate blends (default: %(default)s)', default=100)
+    parser_style_mix_4.add_argument('--view-size', type=int, help='Display size for image (default: %(default)s)', default=512)
+
 
     args = parser.parse_args()
     kwargs = vars(args)
@@ -365,7 +504,8 @@ Run 'python %(prog)s <subcommand> --help' for subcommand help.''',
         'generate-images': 'run_generator.generate_images',
         'style-mixing-example': 'run_generator.style_mixing_example',
         'style-mix-2': 'run_generator.style_mix_2',
-        'style-mix-3': 'run_generator.style_mix_3'
+        'style-mix-3': 'run_generator.style_mix_3',
+        'style-mix-4': 'run_generator.style_mix_4'
         }
     dnnlib.submit_run(sc, func_name_map[subcmd], **kwargs)
 
